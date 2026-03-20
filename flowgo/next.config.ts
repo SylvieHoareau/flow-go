@@ -16,14 +16,6 @@ const nextConfig: NextConfig = {
   images: {
     unoptimized: true,
   },
-
-  // Optionnel : évite les erreurs de build si tu as des erreurs de lint/ts mineures
-  eslint: {
-    ignoreDuringBuilds: true,
-  },
-  typescript: {
-    ignoreBuildErrors: true,
-  }
-} as NextConfig;
+};
 
 export default nextConfig;
