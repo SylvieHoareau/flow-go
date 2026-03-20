@@ -2,34 +2,72 @@
 import { useEffect, useRef } from 'react';
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
+import { busService } from '../services/busService';
 
-// On définit la structure des données reçues de l'API (Contrat)
-interface ApiBusRoute {
-  route_long_name: string;
-  route_color: string;
-  shape: {
-    geometry: GeoJSON.MultiLineString; // C'est un MultiLineString ici
-  };
-}
-
-interface ApiBusStop {
-  stop_id: string;
-  stop_name: string;
-  stop_coordinates: { lon: number; lat: number };
-}
-
-interface ApiBusStopResponse {
-  results: ApiBusStop[];
-}
-
-interface ApiResponse {
-  results: ApiBusRoute[];
-}
+// Fonction pour annoncer aux lecteurs d'écran
+const announceToAccessibility = (message: string) => {
+  const announcement = document.createElement('div');
+  announcement.setAttribute('role', 'status');
+  announcement.setAttribute('aria-live', 'polite');
+  announcement.setAttribute('aria-atomic', 'true');
+  announcement.className = 'sr-only';
+  announcement.textContent = message;
+  document.body.appendChild(announcement);
+  setTimeout(() => announcement.remove(), 1000);
+};
 
 export default function Map() {
   // On type la référence : elle pointera vers un HTMLDivElement ou null
   const mapContainer = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
+
+  // Fonction pour gérer les interactions (clics, survols)
+  const setupInteractions = (map: maplibregl.Map) => {
+    // Clic sur un arrêt
+    map.on('click', 'stop-circles', (e) => {
+      e.originalEvent.stopPropagation();
+      const feature = e.features?.[0];
+      if (!feature) return;
+
+      // On vérifie que c'est bien un point avant d'afficher le popup
+      if (feature.geometry.type === 'Point') {
+        const coords = feature.geometry.coordinates as [number, number];
+        const stopName = feature.properties?.name || 'Arrêt inconnu';
+        new maplibregl.Popup({ focusAfterOpen: true })
+          .setLngLat(coords)
+          .setHTML(`<div class="p-2"><b>Arrêt :</b> ${stopName}</div>`)
+          .addTo(map);
+        // Annoncer au lecteur d'écran
+        announceToAccessibility(`Arrêt ${stopName} sélectionné.`);
+      }
+    });
+
+    // Clic sur une ligne
+    map.on('click', 'route-line', (e) => {
+      const feature = e.features?.[0];
+      if (!feature) return;
+      const lineName = feature.properties?.name || 'Ligne inconnue';
+
+      new maplibregl.Popup({ focusAfterOpen: true })
+        .setLngLat(e.lngLat)
+        .setHTML(`
+          <div style="border-left: 5px solid ${feature.properties?.color}; padding-left: 8px;">
+            <strong>${lineName}</strong><br/>
+            <small>Réseau Cars Jaunes</small>
+          </div>
+        `)
+        .addTo(map);
+      // Annoncer au lecteur d'écran
+      announceToAccessibility(`Ligne ${lineName} sélectionnée.`);
+    });
+
+    // Curseur pointer au survol
+    const layers = ['stop-circles', 'route-line'];
+    layers.forEach(layer => {
+      map.on('mouseenter', layer, () => map.getCanvas().style.cursor = 'pointer');
+      map.on('mouseleave', layer, () => map.getCanvas().style.cursor = '');
+    });
+  };
 
   useEffect(() => {
     // Sécurité : On vérifie que le container existe avant d'initialiser
@@ -46,148 +84,47 @@ export default function Map() {
 
     map.on('load', async () => {
       try {
-        // ---- PARTIE LIGNE DE BUS ----
-        const response = await fetch('https://data.regionreunion.com/api/explore/v2.1/catalog/datasets/gtfs-routes-cars-jaunes-lareunion/records?limit=20');
-        
-        if (!response.ok) throw new Error("Erreur lors de la récupération des données");
+        // On lance les deux appels en parallèle (Optimisation Performance !)
+        const [routesGeojson, stopsGeojson] = await Promise.all([
+            busService.getRoutes(),
+            busService.getStops()
+        ]);
 
-        const data: ApiResponse = await response.json();
+        // Ajout des sources
+        map.addSource('cars-jaunes', { type: 'geojson', data: routesGeojson });
+        map.addSource('bus-stops', { type: 'geojson', data: stopsGeojson });
 
-        // Transformation typée
-        const features = data.results
-            .filter(route => route.shape && route.shape.geometry) // On s'assure d'avoir les données nécessaires
-            .map((route) => ({
-                type: 'Feature' as const, // Force le type literal
-                geometry: route.shape.geometry,
-                properties: {
-                    name: route.route_long_name,
-                    // Sécurité : si route_color est vide, on met du gris par défaut
-                    color: route.route_color || '#FF0000'
-                }
-            }));
-
-        const geojson: GeoJSON.FeatureCollection = {
-          type: 'FeatureCollection',
-          features: features as GeoJSON.Feature[]
-        };
-
-        map.addSource('cars-jaunes', {
-          type: 'geojson',
-          data: geojson
-        });
-
+        // Ajout des layers (lignes puis points pour qu'ils soient au-dessus)
         map.addLayer({
-          id: 'route-line',
-          type: 'line',
-          source: 'cars-jaunes',
-          layout: {
-            'line-join': 'round',
-            'line-cap': 'round'
-          },
-          paint: {
-            'line-color': ['get', 'color'], // Utilise la couleur définie dans les propriétés
-            'line-width': 4
-          }
-        });
-
-        // --- PARTIE ARRÊTS (STOPS) ---
-        const stopsResponse = await fetch('https://data.regionreunion.com/api/explore/v2.1/catalog/datasets/gtfs-stops-cars-jaunes-lareunion/records?limit=100');
-        const stopsData: ApiBusStopResponse = await stopsResponse.json();
-
-        const stopFeatures: GeoJSON.Feature<GeoJSON.Point, { name: string }>[] = stopsData.results.map((stop) => ({
-            type: 'Feature',
-            geometry: {
-                type: 'Point',
-                coordinates: [stop.stop_coordinates.lon, stop.stop_coordinates.lat]
-            },
-            properties: {
-                name: stop.stop_name
-            }
-        }));
-
-        // Ajout de la source des arrêts
-        map.addSource('bus-stops', {
-            type: 'geojson',
-            data: {
-                type: 'FeatureCollection',
-                features: stopFeatures
+            id: 'route-line',
+            type: 'line',
+            source: 'cars-jaunes',
+            paint: { 
+                'line-color': ['get', 'color'], 
+                'line-width': 4, 
+                'line-opacity': 0.8
             }
         });
 
-        // Ajout de la couche visuelle (des cercles blancs avec un bord noir)
         map.addLayer({
             id: 'stop-circles',
             type: 'circle',
             source: 'bus-stops',
-            paint: {
-                'circle-radius': 5,
-                'circle-color': '#FFFFFF',
+            paint: { 
+                'circle-radius': 5, 
+                'circle-color': '#FFFFFF', 
                 'circle-stroke-width': 2,
-                'circle-stroke-color': '#000000'
+                'circle-stroke-color': '#333333',
             }
         });
 
-        // Ajout d'un popup au clic sur un arrêt
-        map.on('click', 'stop-circles', (e) => {
-            // Empêche le clic de se propager à la ligne en dessous
-            e.originalEvent.stopPropagation();
+        // Gestion des Interactions (UI/UX)
+        setupInteractions(map);
 
-            const properties = e.features![0].properties;
-    
-            new maplibregl.Popup()
-                .setLngLat((e.features![0].geometry as any).coordinates)
-                .setHTML(`<b style="color: #333;">Arrêt : ${properties?.name}</b>`)
-                .addTo(map);
-                
-            const coordinates = (e.features![0].geometry as GeoJSON.Point).coordinates.slice();
-            const description = e.features![0].properties?.name;
-
-            alert("Arrêt : " + description);
-        });
-
-        // Change le curseur en pointeur quand on survole un arrêt
-        map.on('mouseenter', 'stop-circles', () => {
-            map.getCanvas().style.cursor = 'pointer';
-        });
-
-        // Réinitialise le curseur quand on quitte l'arrêt
-        map.on('mouseleave', 'stop-circles', () => {
-            map.getCanvas().style.cursor = '';
-        });
-
-        // Détection du clic sur les lignes de bus
-        map.on('click', 'route-line', (e) => {
-            if (!e.features || e.features.length === 0) return;
-
-            const feature = e.features[0];
-            const lineName = feature.properties?.name;
-            const lineColor = feature.properties?.color;
-
-            // Création d'une popup élégante au point de clic
-            new maplibregl.Popup({ className: 'flowgo-popup' })
-                .setLngLat(e.lngLat)
-                .setHTML(`
-                    <div style="padding: 5px;">
-                        <strong style="color: ${lineColor}">Ligne : ${lineName}</strong>
-                        <p style="margin: 5px 0 0 0; font-size: 12px;">Réseau Cars Jaunes</p>
-                    </div>
-                `)
-                .addTo(map);
-        });
-
-        // Amélioration de l'UX : Changement du curseur au survol des lignes
-        map.on('mouseenter', 'route-line', () => {
-            map.getCanvas().style.cursor = 'pointer';
-        });
-
-        // Réinitialisation du curseur au départ des lignes
-        map.on('mouseleave', 'route-line', () => {
-            map.getCanvas().style.cursor = '';
-        });
-      } catch (error) {
-        console.error("Erreur FlowGo :", error instanceof Error ? error.message : String(error));
-        console.error("Erreur FlowGo lors du chargement des arrêts :", error);
-      }
+        } catch (error) {
+            console.error("Erreur FlowGo Service:", error);
+            announceToAccessibility("Erreur lors du chargement de la carte. Veuillez rafraîchir la page.");
+        }
     });
 
     return () => {
@@ -195,5 +132,13 @@ export default function Map() {
     };
   }, []);
 
-  return <div ref={mapContainer} className="w-full h-[600px]" />;
+  return (
+    <div 
+      ref={mapContainer} 
+      className="w-full h-full rounded-lg shadow-inner"
+      role="region"
+      aria-label="Carte interactive des lignes de bus"
+      tabIndex={0}
+    />
+  );
 }
