@@ -7,7 +7,7 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 interface ApiBusRoute {
   route_long_name: string;
   route_color: string;
-  shape: any; // On peut affiner en GeoJSON.Geometry si besoin
+  shape: GeoJSON.Geometry;
 }
 
 interface ApiResponse {
@@ -52,7 +52,7 @@ export default function Map() {
 
         const geojson: GeoJSON.FeatureCollection = {
           type: 'FeatureCollection',
-          features: features as any
+          features: features as GeoJSON.Feature[]
         };
 
         map.addSource('cars-jaunes', {
@@ -74,7 +74,7 @@ export default function Map() {
           }
         });
       } catch (error) {
-        console.error("Erreur FlowGo :", error);
+        console.error("Erreur FlowGo :", error instanceof Error ? error.message : String(error));
       }
     });
 
